@@ -368,12 +368,10 @@ def unify_datasets():
 
 if __name__ == '__main__':
     # unify_datasets()
-    """
     model = NutNLIModel(batch_size=16)
     model.load_training_dataset("./Data/unified_dataset.csv", validation_percentage=0.01)
     model.train_me(3)
     model.save_model("./ENG_model.pt")
-    """
 
     model = NutNLIModel(batch_size=32, weight_path="./ENG_model.pt")
     model.load_training_dataset("./Data/train.csv")
