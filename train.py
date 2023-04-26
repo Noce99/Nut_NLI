@@ -11,11 +11,10 @@ import matplotlib.pyplot as plt
 
 
 class NutNLIModel(nn.Module):
-    def __init__(self, batch_size=8, num_of_layers_to_unfreeze=0):
+    def __init__(self, batch_size=16, weight_path=None):
         super().__init__()
 
         self.batch_size = batch_size
-        self.num_of_layers_to_unfreeze = num_of_layers_to_unfreeze
 
         # set up dataset lists
         self.training_pairs = []
@@ -32,7 +31,8 @@ class NutNLIModel(nn.Module):
         self.scheduler = None
 
         self.roberta = XLMRobertaForSequenceClassification.from_pretrained("xlm-roberta-large", num_labels=3)
-        self.roberta.load_state_dict(torch.load("./MyModel/model.pt"))
+        if weight_path is not None:
+            self.roberta.load_state_dict(torch.load(weight_path))
         self.tokenizer = XLMRobertaTokenizer.from_pretrained("xlm-roberta-base")
 
         # get some information from the bert model
@@ -102,7 +102,7 @@ class NutNLIModel(nn.Module):
         correct_classification = torch.sum(tensor_true == tensor_prediction)
         accuracy = correct_classification / len(labels)
         return float(accuracy)
-    
+
     def create_test_labels(self):
         pairs = self.test_pairs
 
@@ -123,8 +123,8 @@ class NutNLIModel(nn.Module):
         for i in range(len(self.test_ids)):
             submission.write(f"{self.test_ids[i]},{int(tensor_prediction[i])}\n")
         submission.close()
-        
-    
+
+
     def from_text_to_bert_input(self, sentence_pairs):
         """
         :param sentence_pairs: A list of tuple containing the sentences as text
@@ -137,27 +137,30 @@ class NutNLIModel(nn.Module):
         attention_mask = tokenized_text["attention_mask"].to('cuda')
         return input_ids, attention_mask
 
-    def load_training_dataset(self, validation_percentage=0.2):
-        df = pd.read_csv("../Data/train.csv")
+    def load_training_dataset(self, path, validation_percentage=0.2):
+        df = pd.read_csv(path)
         train = int(df.shape[0] * (1 - validation_percentage))
         premises = df["premise"].values
         hypothesis = df["hypothesis"].values
         labels = df["label"].values
 
         loading_database_tqdm = tqdm(range(len(premises)), unit=" Sentences Pairs", desc="Loading Dataset")
+        labels_dict = {0:0, 1:1, 2:2, "entailment":0, "neutral":1, "contradiction":2}
 
         for i in loading_database_tqdm:
             if i < train:
-                self.training_pairs.append((premises[i], hypothesis[i]))
-                self.training_labels.append(labels[i])
+                if labels[i] in labels_dict:
+                    self.training_pairs.append((premises[i], hypothesis[i]))
+                    self.training_labels.append(labels_dict[labels[i]])
             else:
-                self.validation_pairs.append((premises[i], hypothesis[i]))
-                self.validation_labels.append(labels[i])
+                if labels[i] in labels_dict:
+                    self.validation_pairs.append((premises[i], hypothesis[i]))
+                    self.validation_labels.append(labels_dict[labels[i]])
 
         print(f"Loaded {len(self.training_pairs)} training data and {len(self.validation_pairs)} validation data.")
-    
-    def load_test_dataset(self):
-        df = pd.read_csv("../Data/test.csv")
+
+    def load_kaggle_test_dataset(self):
+        df = pd.read_csv("./Data/test.csv")
         ids = df["id"].values
         premises = df["premise"].values
         hypothesis = df["hypothesis"].values
@@ -169,7 +172,7 @@ class NutNLIModel(nn.Module):
             self.test_ids.append(ids[i])
 
         print(f"Loaded {len(self.test_pairs)} test data")
-    
+
     def train_step(self, sentence_pairs, true_probability):
         predicted_probability = self.forward(sentence_pairs)
 
@@ -190,9 +193,9 @@ class NutNLIModel(nn.Module):
 
         total_step = len(self.training_pairs) // self.batch_size
 
-        self.optimizer = AdamW(self.parameters(), lr=2e-5, eps=1e-6)
+        self.optimizer = AdamW(self.parameters(), lr=1e-5, eps=1e-8)
         self.scheduler = get_linear_schedule_with_warmup(self.optimizer,
-                                                         num_warmup_steps=int(0.2*total_step),
+                                                         num_warmup_steps=int(0.1*total_step),
                                                          num_training_steps=total_step)
 
         for epoch in range(epochs):
@@ -220,7 +223,10 @@ class NutNLIModel(nn.Module):
 
             plt.plot(list(range(len(self.history_loss))), self.history_loss)
             plt.savefig('loss.png')
-    
+
+    def save_model(self, path):
+        torch.save(self.roberta.state_dict(), path)
+
     @staticmethod
     def label_to_probability(labels):
         probabilities = torch.zeros(len(labels), 3, dtype=torch.float)
@@ -228,12 +234,150 @@ class NutNLIModel(nn.Module):
             probabilities[i, label] = 1.
         return probabilities.to('cuda')
 
+def from_list_to_string(jsonl_list):
+    i = 0
+    a_string = ""
+    while i < len(jsonl_list):
+        if jsonl_list[i] is not None:
+            a_string += str(jsonl_list[i])
+        else:
+            break
+        i += 1
+    return a_string
+
+def unify_datasets():
+    my_df = pd.DataFrame(columns=["premise", "hypothesis", "label", 'dataset'])
+
+
+    print("Loading ANLI R1")
+    f = open("./Data/ANLI/R1/train.jsonl", "r")
+    line = f.readline()
+    n = 0
+    ANLI_dict = {"e":"entailment", "c":"contradiction", "n":"neutral"}
+    while line:
+        ANLI_line_df = pd.read_json(line, orient='index')
+
+        premise = ANLI_line_df.iloc[1].tolist()[0]
+        hypothesis = ANLI_line_df.iloc[2].tolist()[0]
+        label = ANLI_dict[ANLI_line_df.iloc[3].tolist()[0]]
+        #print(f"Premise: {premise}\nHypothesis: {hypothesis}\nLabel: {label}")
+        line = f.readline()
+        n += 1
+        my_df.loc[len(my_df)] = {'premise': premise, 'hypothesis': hypothesis, 'label': label, 'dataset': "ANLI_R1"}
+        if n % 1000 == 0:
+            print(n)
+    print(f"Finished ANLI R1 {n}")
+    f.close()
+
+    print("Loading ANLI R2")
+    f = open("./Data/ANLI/R2/train.jsonl", "r")
+    line = f.readline()
+    n = 0
+    ANLI_dict = {"e":"entailment", "c":"contradiction", "n":"neutral"}
+    while line:
+        ANLI_line_df = pd.read_json(line, orient='index')
+
+        premise = ANLI_line_df.iloc[1].tolist()[0]
+        hypothesis = ANLI_line_df.iloc[2].tolist()[0]
+        label = ANLI_dict[ANLI_line_df.iloc[3].tolist()[0]]
+        #print(f"Premise: {premise}\nHypothesis: {hypothesis}\nLabel: {label}")
+        line = f.readline()
+        n += 1
+        my_df.loc[len(my_df)] = {'premise': premise, 'hypothesis': hypothesis, 'label': label, 'dataset': "ANLI_R2"}
+        if n % 1000 == 0:
+            print(n)
+    print(f"Finished ANLI R2 {n}")
+    f.close()
+
+    print("Loading ANLI R3")
+    f = open("./Data/ANLI/R3/train.jsonl", "r")
+    line = f.readline()
+    n = 0
+    ANLI_dict = {"e":"entailment", "c":"contradiction", "n":"neutral"}
+    while line:
+        ANLI_line_df = pd.read_json(line, orient='index')
+
+        premise = ANLI_line_df.iloc[1].tolist()[0]
+        hypothesis = ANLI_line_df.iloc[2].tolist()[0]
+        label = ANLI_dict[ANLI_line_df.iloc[3].tolist()[0]]
+        #print(f"Premise: {premise}\nHypothesis: {hypothesis}\nLabel: {label}")
+        line = f.readline()
+        n += 1
+        my_df.loc[len(my_df)] = {'premise': premise, 'hypothesis': hypothesis, 'label': label, 'dataset': "ANLI_R3"}
+        if n % 1000 == 0:
+            print(n)
+    print(f"Finished ANLI R3 {n}")
+    f.close()
+
+    print("Loading MNLI")
+    f = open("./Data/MultiNLI/multinli_train.jsonl", "r")
+    line = f.readline()
+    n = 0
+    while line:
+        MNLI_line_df = pd.read_json(line, orient='index')
+        premise = from_list_to_string(MNLI_line_df.iloc[5].tolist())
+        hypothesis = from_list_to_string(MNLI_line_df.iloc[8].tolist())
+        label = from_list_to_string(MNLI_line_df.iloc[2].tolist())
+        #print(f"Premise: {premise}\nHypothesis: {hypothesis}\nLabel: {label}")
+        line = f.readline()
+        n += 1
+        my_df.loc[len(my_df)] = {'premise': premise, 'hypothesis': hypothesis, 'label': label, 'dataset': "MNLI"}
+        if n % 1000 == 0:
+            print(n)
+    print(f"Finished MNLI {n}")
+    f.close()
+
+    print("Loading FEVER")
+    f = open("./Data/FEVER/fever_train.jsonl", "r")
+    line = f.readline()
+    n = 0
+    FEVER_dict = {"SUPPORTS":"entailment", "REFUTES":"contradiction", "NOT ENOUGH INFO":"neutral"}
+    while line:
+        FEVER_line_df = pd.read_json(line, orient='index')
+        premise = FEVER_line_df.iloc[2].tolist()[0]
+        hypothesis = FEVER_line_df.iloc[3].tolist()[0]
+        label = FEVER_dict[FEVER_line_df.iloc[4].tolist()[0]]
+        #print(f"Premise: {premise}\nHypothesis: {hypothesis}\nLabel: {label}")
+        line = f.readline()
+        n += 1
+        my_df.loc[len(my_df)] = {'premise': premise, 'hypothesis': hypothesis, 'label': label, 'dataset': "FEVER"}
+        if n % 1000 == 0:
+            print(n)
+    print(f"Finished FEVER {n}")
+    f.close()
+
+    print("Loading SNLI")
+    f = open("./Data/SNLI/snli_train.jsonl", "r")
+    line = f.readline()
+    n = 0
+    while line:
+        SNLI_line_df = pd.read_json(line, orient='index')
+        premise = from_list_to_string(SNLI_line_df.iloc[4].tolist())
+        hypothesis = from_list_to_string(SNLI_line_df.iloc[7].tolist())
+        label = from_list_to_string(SNLI_line_df.iloc[2].tolist())
+        #print(f"Premise: {premise}\nHypothesis: {hypothesis}\nLabel: {label}")
+        line = f.readline()
+        n += 1
+        my_df.loc[len(my_df)] = {'premise': premise, 'hypothesis': hypothesis, 'label': label, 'dataset': "SNLI"}
+        if n % 1000 == 0:
+            print(n)
+    print(f"Finished SNLI {n}")
+    f.close()
+
+    my_df.to_csv("./Data/unified_dataset.csv", index=False)
 
 if __name__ == '__main__':
-    model = NutNLIModel(batch_size=32, num_of_layers_to_unfreeze=12)
-    model.load_training_dataset()
+    # unify_datasets()
+    """
+    model = NutNLIModel(batch_size=16)
+    model.load_training_dataset("./Data/unified_dataset.csv", validation_percentage=0.01)
     model.train_me(3)
-    model.load_test_dataset()
+    model.save_model("./ENG_model.pt")
+    """
+
+    model = NutNLIModel(batch_size=32, weight_path="./ENG_model.pt")
+    model.load_training_dataset("./Data/train.csv")
+    model.train_me(3)
+    model.load_kaggle_test_dataset()
     model.create_test_labels()
-    
-    #symanto/xlm-roberta-base-snli-mnli-anli-xnli
+    model.save_model("./KAGGLE_model.pt")
